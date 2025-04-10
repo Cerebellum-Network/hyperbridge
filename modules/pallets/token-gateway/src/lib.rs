@@ -108,8 +108,7 @@ pub mod pallet {
 
 		/// Fungible asset implementation
 		type Assets: fungibles::Mutate<Self::AccountId>
-			+ fungibles::metadata::Inspect<Self::AccountId>;
-
+		+ fungibles::metadata::Inspect<Self::AccountId>;
 		/// The native asset ID
 		type NativeAssetId: Get<AssetId<Self>>;
 
@@ -233,9 +232,6 @@ pub mod pallet {
 		u128: From<<<T as Config>::NativeCurrency as Currency<T::AccountId>>::Balance>,
 		<T as pallet_ismp::Config>::Balance:
 			From<<<T as Config>::NativeCurrency as Currency<T::AccountId>>::Balance>,
-		<<T as Config>::Assets as fungibles::Inspect<T::AccountId>>::Balance:
-			From<<<T as Config>::NativeCurrency as Currency<T::AccountId>>::Balance>,
-		<<T as Config>::Assets as fungibles::Inspect<T::AccountId>>::Balance: From<u128>,
 		[u8; 32]: From<<T as frame_system::Config>::AccountId>,
 	{
 		/// Teleports a registered asset
@@ -253,62 +249,17 @@ pub mod pallet {
 			let dispatcher = <T as Config>::Dispatcher::default();
 			let asset_id = SupportedAssets::<T>::get(params.asset_id.clone())
 				.ok_or_else(|| Error::<T>::UnregisteredAsset)?;
-			let decimals = if params.asset_id == T::NativeAssetId::get() {
-				// Custody funds in pallet
-				let is_native = NativeAssets::<T>::get(T::NativeAssetId::get());
-				if is_native {
-					<T as Config>::NativeCurrency::transfer(
-						&who,
-						&Self::pallet_account(),
-						params.amount,
-						ExistenceRequirement::AllowDeath,
-					)?;
-				} else {
-					// Reduce total supply
-					let imbalance = <T as Config>::NativeCurrency::burn(params.amount);
-					// Burn amount from account
-					<T as Config>::NativeCurrency::settle(
-						&who,
-						imbalance,
-						WithdrawReasons::TRANSFER,
-						ExistenceRequirement::AllowDeath,
-					)
-					.map_err(|_| Error::<T>::AssetTeleportError)?;
-				}
-
-				T::Decimals::get()
-			} else {
-				let is_native = NativeAssets::<T>::get(params.asset_id.clone());
-				if is_native {
-					<T as Config>::Assets::transfer(
-						params.asset_id.clone(),
-						&who,
-						&Self::pallet_account(),
-						params.amount.into(),
-						Preservation::Expendable,
-					)?;
-				} else {
-					// Assets that do not originate from this chain are burned
-					<T as Config>::Assets::burn_from(
-						params.asset_id.clone(),
-						&who,
-						params.amount.into(),
-						Preservation::Expendable,
-						Precision::Exact,
-						Fortitude::Polite,
-					)?;
-				}
-
-				<T::Assets as fungibles::metadata::Inspect<T::AccountId>>::decimals(
-					params.asset_id.clone(),
-				)
-			};
-
+			<T as Config>::NativeCurrency::transfer(
+				&who,
+				&Self::pallet_account(),
+				params.amount,
+				ExistenceRequirement::AllowDeath,
+			)?;
+			let decimals = T::Decimals::get(); //TODO: Verify this
 			let to = params.recepient.0;
 			let from: [u8; 32] = who.clone().into();
 			let erc_decimals = Precisions::<T>::get(params.asset_id, params.destination)
 				.ok_or_else(|| Error::<T>::AssetDecimalsNotFound)?;
-
 			let body = match params.call_data {
 				Some(data) => {
 					let body = BodyWithCall {
@@ -521,7 +472,6 @@ impl<T: Config> IsmpModule for Pallet<T>
 where
 	<T as frame_system::Config>::AccountId: From<[u8; 32]>,
 	<<T as Config>::NativeCurrency as Currency<T::AccountId>>::Balance: From<u128>,
-	<<T as Config>::Assets as fungibles::Inspect<T::AccountId>>::Balance: From<u128>,
 {
 	fn on_accept(
 		&self,
@@ -553,13 +503,8 @@ where
 				}
 			})?;
 
-		let decimals = if local_asset_id == T::NativeAssetId::get() {
-			T::Decimals::get()
-		} else {
-			<T::Assets as fungibles::metadata::Inspect<T::AccountId>>::decimals(
-				local_asset_id.clone(),
-			)
-		};
+		let decimals = T::Decimals::get();
+
 		let erc_decimals = Precisions::<T>::get(local_asset_id.clone(), source)
 			.ok_or_else(|| anyhow!("Asset decimals not configured"))?;
 		let amount = convert_to_balance(
@@ -572,48 +517,17 @@ where
 			meta: Meta { source, dest, nonce },
 		})?;
 		let beneficiary: T::AccountId = body.to.0.into();
-		if local_asset_id == T::NativeAssetId::get() {
-			let is_native = NativeAssets::<T>::get(T::NativeAssetId::get());
-			if is_native {
-				<T as Config>::NativeCurrency::transfer(
-					&Pallet::<T>::pallet_account(),
-					&beneficiary,
-					amount.into(),
-					ExistenceRequirement::AllowDeath,
-				)
-				.map_err(|_| ismp::error::Error::ModuleDispatchError {
-					msg: "Token Gateway: Failed to complete asset transfer".to_string(),
-					meta: Meta { source, dest, nonce },
-				})?;
-			} else {
-				// Increase total supply
-				let imbalance = <T as Config>::NativeCurrency::issue(amount.into());
-				// Mint into the beneficiary account
-				<T as Config>::NativeCurrency::resolve_creating(&beneficiary, imbalance);
-			}
-		} else {
-			// Assets that do not originate from this chain are minted
-			let is_native = NativeAssets::<T>::get(local_asset_id.clone());
-			if is_native {
-				<T as Config>::Assets::transfer(
-					local_asset_id,
-					&Pallet::<T>::pallet_account(),
-					&beneficiary,
-					amount.into(),
-					Preservation::Expendable,
-				)
-				.map_err(|_| ismp::error::Error::ModuleDispatchError {
-					msg: "Token Gateway: Failed to complete asset transfer".to_string(),
-					meta: Meta { source, dest, nonce },
-				})?;
-			} else {
-				<T as Config>::Assets::mint_into(local_asset_id, &beneficiary, amount.into())
-					.map_err(|_| ismp::error::Error::ModuleDispatchError {
-						msg: "Token Gateway: Failed to complete asset transfer".to_string(),
-						meta: Meta { source, dest, nonce },
-					})?;
-			}
-		}
+
+		<T as Config>::NativeCurrency::transfer(
+			&Pallet::<T>::pallet_account(),
+			&beneficiary,
+			amount.into(),
+			ExistenceRequirement::AllowDeath,
+		)
+			.map_err(|_| ismp::error::Error::ModuleDispatchError {
+				msg: "Token Gateway: Failed to complete asset transfer".to_string(),
+				meta: Meta { source, dest, nonce },
+			})?;
 
 		if let Some(call_data) = body.data {
 			let substrate_data = SubstrateCalldata::decode(&mut &call_data.0[..])
@@ -714,13 +628,8 @@ where
 						msg: "Token Gateway: Unknown asset".to_string(),
 						meta: Meta { source, dest, nonce },
 					})?;
-				let decimals = if local_asset_id == T::NativeAssetId::get() {
-					T::Decimals::get()
-				} else {
-					<T::Assets as fungibles::metadata::Inspect<T::AccountId>>::decimals(
-						local_asset_id.clone(),
-					)
-				};
+				let decimals = T::Decimals::get();
+
 				let erc_decimals = Precisions::<T>::get(local_asset_id.clone(), dest)
 					.ok_or_else(|| anyhow!("Asset decimals not configured"))?;
 				let amount = convert_to_balance(
@@ -732,52 +641,17 @@ where
 					msg: "Token Gateway: Trying to withdraw Invalid amount".to_string(),
 					meta: Meta { source, dest, nonce },
 				})?;
-
-				if local_asset_id == T::NativeAssetId::get() {
-					let is_native = NativeAssets::<T>::get(T::NativeAssetId::get());
-					if is_native {
-						<T as Config>::NativeCurrency::transfer(
-							&Pallet::<T>::pallet_account(),
-							&beneficiary,
-							amount.into(),
-							ExistenceRequirement::AllowDeath,
-						)
-						.map_err(|_| ismp::error::Error::ModuleDispatchError {
-							msg: "Token Gateway: Failed to complete asset transfer".to_string(),
-							meta: Meta { source, dest, nonce },
-						})?;
-					} else {
-						let imbalance = <T as Config>::NativeCurrency::issue(amount.into());
-						<T as Config>::NativeCurrency::resolve_creating(&beneficiary, imbalance);
-					}
-				} else {
-					// Assets that do not originate from this chain are minted
-					let is_native = NativeAssets::<T>::get(local_asset_id.clone());
-					if is_native {
-						<T as Config>::Assets::transfer(
-							local_asset_id,
-							&Pallet::<T>::pallet_account(),
-							&beneficiary,
-							amount.into(),
-							Preservation::Expendable,
-						)
-						.map_err(|_| ismp::error::Error::ModuleDispatchError {
-							msg: "Token Gateway: Failed to complete asset transfer".to_string(),
-							meta: Meta { source, dest, nonce },
-						})?;
-					} else {
-						<T as Config>::Assets::mint_into(
-							local_asset_id,
-							&beneficiary,
-							amount.into(),
-						)
-						.map_err(|_| ismp::error::Error::ModuleDispatchError {
-							msg: "Token Gateway: Failed to complete asset transfer".to_string(),
-							meta: Meta { source, dest, nonce },
-						})?;
-					}
-				}
-
+				///
+				<T as Config>::NativeCurrency::transfer(
+					&Pallet::<T>::pallet_account(),
+					&beneficiary,
+					amount.into(),
+					ExistenceRequirement::AllowDeath,
+				)
+					.map_err(|_| ismp::error::Error::ModuleDispatchError {
+						msg: "Token Gateway: Failed to complete asset transfer".to_string(),
+						meta: Meta { source, dest, nonce },
+					})?;
 				Pallet::<T>::deposit_event(Event::<T>::AssetRefunded {
 					beneficiary,
 					amount: amount.into(),
